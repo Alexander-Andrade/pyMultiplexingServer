@@ -22,7 +22,6 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Connection.py" />
     <Compile Include="FileWorker.py" />
     <Compile Include="pyMultiplexingServer.py" />
     <Compile Include="SocketWrapper.py" />

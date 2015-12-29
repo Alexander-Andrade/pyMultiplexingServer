@@ -1,73 +1,43 @@
 import sys  #for IP and port passing
 import socket
 import re   #regular expressions
-from Connection import Connection
 from FileWorker import*
 from SocketWrapper import*
 import time
 import multiprocessing as mp
+import select
+from enum import Enum,unique
 
+class QueryError(Exception):
+    pass
 
-class TCPServer(Connection):
+@unique
+class QueryType(Enum):
+      Query = 1
+      Download = 2
 
+@unique
+class QueryStatus(Enum):
+      Actual = 1
+      InPorgress = 2
+      Complete = 3
+      Error = 4
 
-    def __init__(self, IP,port,nConnections = 1,sendBuflen = 1024,timeOut = 15):
-        super().__init__(sendBuflen,timeOut)
+class TCPServer:
+
+    def __init__(self, IP,port,nConnections = 1):
         self.servSock = TCP_ServSockWrapper(IP,port,nConnections) 
-        self.talksock = None
-        self.__fillCommandDict()
-        self.clientsId = []
+        self.udpServSock = UDP_ServSockWrapper(IP,port)
+        self.clients = []
 
-
-
-    def __fillCommandDict(self):
-        self.commands.update({'echo':self.echo,
-                              'time':self.time,
-                              'quit':self.quit,
-                              'download':self.sendFileTCP,
-                              'upload':self.recvFileTCP})
-       
-
-    def echo(self,commandArgs):
-        self.talksock.sendMsg(commandArgs)
-
-
-    def time(self,commandArgs):
-        self.talksock.sendMsg(time.asctime())
-
-    def quit(self,commandArgs):
-        self.talksock.raw_sock.shutdown(SHUT_RDWR)
-        self.talksock.raw_sock.close()
-        self.talksock.raw_sock = None
-
-
-    def sendFileTCP(self,commandArgs):
-        self.sendfile(self.talksock,commandArgs,self.recoverTCP)
-        self.talksock.sendMsg("file downloaded")
-
-
-    def recvFileTCP(self,commandArgs):
-        self.receivefile(self.talksock,commandArgs,self.recoverTCP)
-        self.talksock.sendMsg("file uploaded")
-
-
-    def recoverTCP(self,timeOut):
-        self.servSock.raw_sock.settimeout(timeOut)
-        try:
-            self.__registerNewClient()
-        except OSError as e:
-            #disable timeout
-            self.servSock.raw_sock.settimeout(None)
-            raise 
-        #compare prev and cur clients id's, may be the same client
-        if self.clientsId[0] != self.clientsId[1]:
-            raise OSError("new client has connected")
-        return self.talksock
-
-
-    def recowerUdp():
-        pass
-
+    def __registerNewClient(self):
+        sock, addr = self.servSock.raw_sock.accept()
+        sockWrap = SockWrapper(raw_sock=sock,inetAddr=addr)
+        #get id from client
+        sockWrap.id = sockWrap.recvInt()
+        #store in clients list
+        self.clients.append(sockWrap)
+    '''
     def __clientCommandsHandling(self):
         while True:
             try:
@@ -91,31 +61,152 @@ class TCPServer(Connection):
                 #wait for the new client
                 break
 
+    '''
 
-    def writeClientId(self,id):
-        if len(self.clientsId) == 2:
-            #pop old id
-            self.clientsId.pop(0)
-        #write new id
-        self.clientsId.append(id)
-            
-                    
-    def __registerNewClient(self):
-        sock, addr = self.servSock.raw_sock.accept()
-        #if self.talksock is not None:
-        #    self.talksock = None
-        self.talksock = SockWrapper(raw_sock=sock,inetAddr=addr)
-        #get id from client
-        id = self.talksock.recvInt()
-        self.writeClientId(id)
+    def queryFactory(self,sock):
+            cmdMsg = sock.recvMsg()
+            str_cmd,args = Query.parseCommand(cmdMsg)
+            return Query(self.servSock,sock,self.udpServSock,str_cmd,args)
 
-    def workWithClients(self):
+    def clientsMultiplexing(self):
+        readable = []
+        queries = []
         while True:
-            self.__registerNewClient()
-            self.__clientCommandsHandling()
-    
+            #add clients to checkable select list 
+            readable = [sock.raw_sock for sock in self.clients]
+            #add server tcp socket
+            readable.append(self.servSock.raw_sock)
+            try:
+                readable,writable,exceptional = select.select(readable,[],[])          
+            except OSError:
+                continue
+            #if new client try to connect
+            if self.servSock.raw_sock in readable:
+                self.__registerNewClient()
+            #walk throw the clients and record requests
+            for sock in self.clients:
+                if sock.raw_sock in readable:
+                    try:
+                        queries.append( self.queryFactory(sock) )
+                    except QueryError:
+                        continue   
+            #perform requests
+            while any(query.status != QueryStatus.Complete for query in queries): 
+                for query in queries:
+                    if query.status != QueryStatus.Complete:
+                        query.execute()
+
+
+class Query:
+
+    def __init__(self,tcpServSock,tcpSock,udpSock,str_cmd,args):
+        self.status = QueryStatus.Actual
+        self.fileWorker = None
+        self.tcpServSock = tcpServSock
+        self.tcpSock = tcpSock
+        self.udpSock = udpSock
+        self.str_cmd = str_cmd
+        self.args = args
+
    
+    @classmethod
+    def parseCommand(cls,cmd_msg):
+        #check command format
+        regExp = re.compile("[A-Za-z0-9_]+ *.*")
+        if regExp.match(cmd_msg) is None:
+            raise QueryError("invalid command format \"" + cmd_msg + "\"")
+        #find pure command
+        commandRegEx = re.compile("[A-Za-z0-9_]+")
+        #match() Determine if the RE matches at the beginning of the string.
+        matchObj = commandRegEx.match(cmd_msg)
+        if(matchObj == None):
+            #there is no suitable command
+            raise QueryError('there is no such command')
+        #group()	Return the string matched by the RE
+        str_cmd = matchObj.group()
+        if not hasattr(cls,str_cmd):
+            raise QueryError('command is not implemented')
+        #end() Return the ending position of the match
+        cmdEndPos = matchObj.end()
+        #cut finding command from the commandMes
+        args = cmd_msg[cmdEndPos:]
+        #cut spaces after command
+        args = args.lstrip()
+        return (str_cmd,args)
+   
+    def execute(self):
+        try:
+           func = getattr(self,self.str_cmd)
+           func()
+        except AttributeError:
+            return
+         
+    def echo(self):
+        self.tcpSock.sendMsg(self.args)
+        self.status = QueryStatus.Complete
+
+    def time(self):
+        self.tcpSock.sendMsg(time.asctime())
+        self.status = QueryStatus.Complete
+
+    def quit(self):
+        self.tcpSock.raw_sock.shutdown(SHUT_RDWR)
+        self.tcpSock.raw_sock.close()
+        self.tcpSock.raw_sock = None
+        self.status = QueryStatus.Complete
+
+    def download(self):
+        #transfer init
+        if self.status == QueryStatus.Actual:
+            self.fileWorker =  FileWorker(self.tcpSock,args,self.recoverTCP)
+            try:
+                self.fileWorker.sendFileInfo()
+                self.status = QueryStatus.InPorgress
+            except FileWorkerCritError as e:
+                self.status = QueryStatus.Complete
+                self.tcpSock.sendMsg(e)
+        #send packets
+        elif self.status == QueryStatus.InPorgress:
+            self.fileWorker.sendPacketsTCP()
+            if self.fileWorker.file.closed:
+                #download complete
+                self.status = QueryStatus.Complete
+                self.tcpSock.sendMsg("file downloaded")
+       
+    def upload(self):
+        #transfer init
+        if self.status == QueryStatus.Actual:
+            self.fileWorker =  FileWorker(self.tcpSock,args,self.recoverTCP)
+            try:
+                self.fileWorker.recvFileInfo()
+                self.status = QueryStatus.InPorgress
+            except FileWorkerCritError as e:
+                self.status = QueryStatus.Complete
+                print(e)
+        #send packets
+        elif self.status == QueryStatus.InPorgress:
+            self.fileWorker.recvPacketsTCP()
+            if self.fileWorker.file.closed:
+                #download complete
+                self.status = QueryStatus.Complete 
+          
+    def recoverTCP(self,timeOut):
+        self.tcpServSock.raw_sock.settimeout(timeOut)
+        prevClientId = self.tcpSock.id
+        try:
+            self.__registerNewClient()
+        except OSError as e:
+            #disable timeout
+            self.tcpServSock.raw_sock.settimeout(None)
+            raise 
+        #compare prev and cur clients id's, may be the same client
+        if self.tcpSock.id != prevClientId:
+            raise OSError("new client has connected")
+        return self.tcpSock
+
+    def recoverUDP(self):
+        pass
+
 if __name__ == "__main__":
-    
-    server = TCPServer("192.168.1.4","6000")
-    server.workWithClients()
+    #server = TCPServer("192.168.1.2","6000")
+    #server.clientsMultiplexing()
