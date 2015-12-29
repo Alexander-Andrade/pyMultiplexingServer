@@ -64,9 +64,9 @@ class TCPServer:
     '''
 
     def queryFactory(self,sock):
-            cmdMsg = sock.recvMsg()
-            str_cmd,args = Query.parseCommand(cmdMsg)
-            return Query(self.servSock,sock,self.udpServSock,str_cmd,args)
+        cmdMsg = sock.recvMsg()
+        str_cmd,args = Query.parseCommand(cmdMsg)
+        return Query(self.servSock,sock,self.udpServSock,str_cmd,args)
 
     def clientsMultiplexing(self):
         readable = []
@@ -84,6 +84,7 @@ class TCPServer:
             if self.servSock.raw_sock in readable:
                 self.__registerNewClient()
             #walk throw the clients and record requests
+            queries.clear()
             for sock in self.clients:
                 if sock.raw_sock in readable:
                     try:
@@ -136,8 +137,8 @@ class Query:
    
     def execute(self):
         try:
-           func = getattr(self,self.str_cmd)
-           func()
+            func = getattr(self,self.str_cmd)
+            func()
         except AttributeError:
             return
          
@@ -155,23 +156,29 @@ class Query:
         self.tcpSock.raw_sock = None
         self.status = QueryStatus.Complete
 
+    def completeState(self,clientMsg):
+        self.status = QueryStatus.Complete
+        self.tcpSock.sendMsg(clientMsg)
+
     def download(self):
         #transfer init
         if self.status == QueryStatus.Actual:
-            self.fileWorker =  FileWorker(self.tcpSock,args,self.recoverTCP)
+            self.fileWorker =  FileWorker(self.tcpSock,self.args,self.recoverTCP)
             try:
                 self.fileWorker.sendFileInfo()
                 self.status = QueryStatus.InPorgress
-            except FileWorkerCritError as e:
-                self.status = QueryStatus.Complete
-                self.tcpSock.sendMsg(e)
+            except FileWorkerError as e:
+                self.completeState(e)
         #send packets
         elif self.status == QueryStatus.InPorgress:
-            self.fileWorker.sendPacketsTCP()
-            if self.fileWorker.file.closed:
-                #download complete
-                self.status = QueryStatus.Complete
-                self.tcpSock.sendMsg("file downloaded")
+            try:
+                self.fileWorker.sendPacketsTCP()
+                if self.fileWorker.file.closed:
+                    #download complete
+                    self.completeState('file downloaded')
+            except FileWorkerError as e:
+                #download error
+                self.completeState(e)
        
     def upload(self):
         #transfer init
@@ -180,15 +187,18 @@ class Query:
             try:
                 self.fileWorker.recvFileInfo()
                 self.status = QueryStatus.InPorgress
-            except FileWorkerCritError as e:
-                self.status = QueryStatus.Complete
-                print(e)
+            except FileWorkerError as e:
+                self.completeState(e)
         #send packets
         elif self.status == QueryStatus.InPorgress:
-            self.fileWorker.recvPacketsTCP()
-            if self.fileWorker.file.closed:
-                #download complete
-                self.status = QueryStatus.Complete 
+            try:
+                self.fileWorker.recvPacketsTCP()
+                if self.fileWorker.file.closed:
+                    #download complete
+                    self.completeState('file uploaded')
+            except FileWorkerError as e:
+                #upload error
+                self.completeState(e)
           
     def recoverTCP(self,timeOut):
         self.tcpServSock.raw_sock.settimeout(timeOut)
@@ -208,5 +218,5 @@ class Query:
         pass
 
 if __name__ == "__main__":
-    #server = TCPServer("192.168.1.2","6000")
-    #server.clientsMultiplexing()
+    server = TCPServer("192.168.1.2","6000")
+    server.clientsMultiplexing()

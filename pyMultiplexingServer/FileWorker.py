@@ -8,8 +8,6 @@ import zlib #crc32,adler32
 
 class FileWorkerError(Exception):
     pass
-class FileWorkerCritError(Exception):
-    pass
   
 class FileWorker:
     
@@ -41,7 +39,7 @@ class FileWorker:
                 break
             md5.update(data)
         #set old file pos
-        self.file.seek(0,actualfPos)
+        self.file.seek(actualfPos,0)
         return md5
 
     def outFileInfo(self):
@@ -76,21 +74,22 @@ class FileWorker:
         self.file.close()
 
     def sendFileInfo(self):
-        if not os.path.exists(fileName):
+        if not os.path.exists(self.fileName):
             self.sock.sendRefuse() 
-            raise FileWorkerCritError("file does not exist")
+            raise FileWorkerError("file does not exist")
         try:
             #binary mode
             self.file = open(self.fileName,'rb')
         except OSError:
             #say to receiver that can't open the file
             self.sock.sendRefuse()
-            raise FileWorkerCritError("can't open the file")
+            raise FileWorkerError("can't open the file")
         self.sock.sendConfirm()
-        self.fileLen = os.path.getsize(fileName)
+        self.fileLen = os.path.getsize(self.fileName)
         self.outFileInfo()
         self.sock.setReceiveTimeout(self.timeOut)
-        goodChecksum = False  
+        goodChecksum = False
+        crc_size = 4  
         try:
             for i in range(self.nAttempts):
                 try:
@@ -100,10 +99,9 @@ class FileWorker:
                     self.sock.sendInt(self.fileLen)
                     #handshake
                     #calculate checksum
-                    local_checksum = zlib.crc32(self.bufferSize.to_bytes(codeSize, byteorder='big') + self.timeOut.to_bytes(codeSize, byteorder='big') + self.fileLen.to_bytes(codeSize, byteorder='big'))
-                    codeSize = len(local_checksum)    
-                    peer_checksum = self.sock.recv(codeSize)
-                    self.sock.send(local_checksum)
+                    local_checksum = zlib.crc32(self.bufferSize.to_bytes(crc_size, byteorder='big') + self.timeOut.to_bytes(crc_size, byteorder='big') + self.fileLen.to_bytes(crc_size, byteorder='big'))
+                    peer_checksum = self.sock.recvInt()
+                    self.sock.sendInt(local_checksum)
                     if peer_checksum == local_checksum:
                         goodChecksum = True
                         break
@@ -111,8 +109,8 @@ class FileWorker:
                     self.senderRecovers()
             #if not goodChecksum:
             if not goodChecksum:
-                raise FileWorkerCritError('attempts are exhausted')
-        except FileWorkerCritError:
+                raise FileWorkerError('attempts are exhausted')
+        except FileWorkerError:
             self.onEndTranser()
             raise
 
@@ -126,7 +124,8 @@ class FileWorker:
                     if not data:
                         #calc local md5
                         local_md5 = self.calcFileMD5()
-                        peer_md5 = self.sock.recv(localMD5.digest_size)
+                        peer_md5 = self.sock.recv(local_md5.digest_size)
+                        self.sock.send(local_md5.digest)
                         if local_md5 == peer_md5:
                             self.onEndTranser()
                             break
@@ -140,7 +139,7 @@ class FileWorker:
                 except OSError as e:
                     #file transfer reconnection
                     self.senderRecovers()
-        except FileWorkerCritError:
+        except FileWorkerError:
             self.onEndTranser()
             raise           
          
@@ -149,7 +148,7 @@ class FileWorker:
         try:
             self.sock = self.recoveryFunc(self.timeOut << 1)
         except OSError as e:
-            raise FileWorkerCritError(e)
+            raise FileWorkerError(e)
         #get file position to send from
         self.sock.setReceiveTimeout(self.timeOut)
         self.filePos = self.sock.recvInt()
@@ -168,6 +167,7 @@ class FileWorker:
             raise FileWorkerError("can't create the file")
         #get hints configs from the transmitter
         goodChecksum = False
+        crc_size = 4
         try:
             for i in range(self.nAttempts):
                 try:
@@ -175,19 +175,18 @@ class FileWorker:
                     self.timeOut = self.sock.recvInt()
                     self.fileLen = self.sock.recvInt()
                     #calc crc32
-                    local_checksum = zlib.crc32(self.bufferSize.to_bytes(codeSize, byteorder='big') + self.timeOut.to_bytes(codeSize, byteorder='big') + self.fileLen.to_bytes(codeSize, byteorder='big'))
+                    local_checksum = zlib.crc32(self.bufferSize.to_bytes(crc_size, byteorder='big') + self.timeOut.to_bytes(crc_size, byteorder='big') + self.fileLen.to_bytes(crc_size, byteorder='big'))
                     #handshake
-                    codeSize = len(local_checksum)
                     self.sock.send(local_checksum)
-                    peer_checksum = self.sock.recv(codeSize)
+                    peer_checksum = self.sock.recv(crc_size)
                     if peer_checksum == local_checksum:
                         goodChecksum = True
                         break
                 except OSError:
                     self.receiverRecovers()
             if not goodChecksum:
-                raise FileWorkerCritError('attempts are exhausted')
-        except FileWorkerCritError:
+                raise FileWorkerError('attempts are exhausted')
+        except FileWorkerError:
             self.onEndTranser()
             raise
         self.outFileInfo()
@@ -210,11 +209,11 @@ class FileWorker:
                             self.onEndTranser()
                             break
                         else:
-                            raise FileWorkerCritError('wrong md5')    
+                            raise FileWorkerError('wrong md5')    
                 except OSError as e:
                      #file transfer reconnection
                     self.receiverRecovers()
-        except FileWorkerCritError:
+        except FileWorkerError:
             self.onEndTranser()
             raise     
 
@@ -223,7 +222,7 @@ class FileWorker:
         try:
             self.sock = self.recoveryFunc(self.timeOut << 1)
         except OSError as e:
-            raise FileWorkerCritError(e)
+            raise FileWorkerError(e)
         #gives file position to start from
         self.sock.sendInt(self.filePos)
         #timeout on receive op
