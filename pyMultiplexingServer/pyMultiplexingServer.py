@@ -1,4 +1,4 @@
-import sys  #for IP and port passing
+﻿import sys  #for IP and port passing
 import socket
 import re   #regular expressions
 from FileWorker import*
@@ -217,6 +217,9 @@ class Query:
     def recoverUDP(self):
         pass
 
-if __name__ == "__main__":
-    server = TCPServer("192.168.1.2","6000")
+    import zlib
+if __name__ == "__main__": 
+    #f = open('hils.PNG','rb')
+    #f.flash()
+    server = TCPServer("localhost","6000")
     server.clientsMultiplexing()

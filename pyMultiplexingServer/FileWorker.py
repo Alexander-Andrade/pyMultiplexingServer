@@ -5,13 +5,22 @@ import sys
 import hashlib #adler32,md5
 import zlib #crc32,adler32
 
-
 class FileWorkerError(Exception):
     pass
+
+def calcFileMD5(fileName,dataSize=1024):
+    with open(fileName,'rb') as file:
+        #read data portion
+        md5 = hashlib.md5()
+        while True:
+            data = file.read(dataSize)
+            if not data:
+               break
+            md5.update(data)   
+    return (md5.digest(),md5.digest_size)
   
 class FileWorker:
     
-
     def __init__(self,sockWrapper,fileName,recoveryFunc,nPacks=6,bufferSize = 1024,timeOut=30):
         self.timeOut = timeOut
         #packs throw one transfer
@@ -26,21 +35,6 @@ class FileWorker:
         self.recoveryFunc = recoveryFunc
         #number of transfer attempts
         self.nAttempts = 3
-
-    def calcFileMD5(self,dataSize=1024):
-        actualfPos =  self.file.tell()
-        #set to the file beg
-        self.file.seek(0,0)
-        #read data portion
-        md5 = hashlib.md5()
-        while True:
-            data = self.file.read(dataSize)
-            if not data:
-                break
-            md5.update(data)
-        #set old file pos
-        self.file.seek(actualfPos,0)
-        return md5
 
     def outFileInfo(self):
         #print file name
@@ -123,16 +117,14 @@ class FileWorker:
                     #if eof
                     if not data:
                         #calc local md5
-                        local_md5 = self.calcFileMD5()
-                        peer_md5 = self.sock.recv(local_md5.digest_size)
-                        self.sock.send(local_md5.digest)
+                        local_md5,md5_size = calcFileMD5(self.fileName)
+                        peer_md5 = self.sock.recv(md5_size)
+                        self.sock.send(local_md5)
                         if local_md5 == peer_md5:
                             self.onEndTranser()
                             break
                         else:
                             raise OSError("fail to transfer file")
-                    #send data portion
-                    #error will rase OSError 
                     self.filePos += len(data)
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.') 
                     self.sock.send(data)
@@ -201,10 +193,10 @@ class FileWorker:
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.')
                     if self.filePos == self.fileLen:
                         #calc local md5
-                        local_md5 = self.calcFileMD5()
+                        local_md5,md5_size = calcFileMD5(self.fileName)
                         #handshake
                         self.sock.send(local_md5)
-                        peer_md5 = self.sock.recv(localMD5.digest_size)
+                        peer_md5 = self.sock.recv(md5_size)
                         if local_md5 == peer_md5:
                             self.onEndTranser()
                             break
