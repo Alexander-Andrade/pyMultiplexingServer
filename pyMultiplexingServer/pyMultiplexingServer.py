@@ -76,26 +76,24 @@ class TCPServer:
             readable = [sock.raw_sock for sock in self.clients]
             #add server tcp socket
             readable.append(self.servSock.raw_sock)
+            timeout = 0 if queries else None 
             try:
-                readable,writable,exceptional = select.select(readable,[],[])          
+                readable,writable,exceptional = select.select(readable,[],[],timeout)          
             except OSError:
                 continue
             #if new client try to connect
             if self.servSock.raw_sock in readable:
                 self.__registerNewClient()
-            #walk throw the clients and record requests
-            queries.clear()
+            #clear executed requests
+            queries = [query for query in queries if query.status != QueryStatus.Complete]
             for sock in self.clients:
                 if sock.raw_sock in readable:
                     try:
                         queries.append( self.queryFactory(sock) )
                     except QueryError:
                         continue   
-            #perform requests
-            while any(query.status != QueryStatus.Complete for query in queries): 
-                for query in queries:
-                    if query.status != QueryStatus.Complete:
-                        query.execute()
+            for query in queries:
+                query.execute()
 
 
 class Query:
@@ -139,8 +137,8 @@ class Query:
         try:
             func = getattr(self,self.str_cmd)
             func()
-        except AttributeError:
-            return
+        except AttributeError as e:
+            print(e)
          
     def echo(self):
         self.tcpSock.sendMsg(self.args)
@@ -160,45 +158,31 @@ class Query:
         self.status = QueryStatus.Complete
         self.tcpSock.sendMsg(clientMsg)
 
-    def download(self):
-        #transfer init
+    def downloadStateMachine(self,fileInfoRoutine,packetsRoutine,clientMsg):
+       #transfer init
         if self.status == QueryStatus.Actual:
             self.fileWorker =  FileWorker(self.tcpSock,self.args,self.recoverTCP)
             try:
-                self.fileWorker.sendFileInfo()
+                fileInfoRoutine(self.fileWorker)
                 self.status = QueryStatus.InPorgress
             except FileWorkerError as e:
                 self.completeState(e)
-        #send packets
+       #packets
         elif self.status == QueryStatus.InPorgress:
             try:
-                self.fileWorker.sendPacketsTCP()
+                packetsRoutine(self.fileWorker)
                 if self.fileWorker.file.closed:
                     #download complete
-                    self.completeState('file downloaded')
+                    self.completeState(clientMsg)
             except FileWorkerError as e:
                 #download error
                 self.completeState(e)
+
+    def download(self):
+        self.downloadStateMachine(FileWorker.sendFileInfo,FileWorker.sendPacketsTCP,'file downloaded')
        
     def upload(self):
-        #transfer init
-        if self.status == QueryStatus.Actual:
-            self.fileWorker =  FileWorker(self.tcpSock,self.args,self.recoverTCP)
-            try:
-                self.fileWorker.recvFileInfo()
-                self.status = QueryStatus.InPorgress
-            except FileWorkerError as e:
-                self.completeState(e)
-        #send packets
-        elif self.status == QueryStatus.InPorgress:
-            try:
-                self.fileWorker.recvPacketsTCP()
-                if self.fileWorker.file.closed:
-                    #download complete
-                    self.completeState('file uploaded')
-            except FileWorkerError as e:
-                #upload error
-                self.completeState(e)
+        self.downloadStateMachine(FileWorker.recvFileInfo,FileWorker.recvPacketsTCP,'file uploaded')
           
     def recoverTCP(self,timeOut):
         self.tcpServSock.raw_sock.settimeout(timeOut)
@@ -218,10 +202,6 @@ class Query:
         pass
 
     import zlib
-if __name__ == "__main__": 
-    li = [b'qwe',b'cvb',b'qwqwfq']
-    j = b''.join(li)
-    #f = open('hils.PNG','rb')
-    #f.flush()
+if __name__ == "__main__":  
     server = TCPServer("192.168.1.2","6000")
     server.clientsMultiplexing()

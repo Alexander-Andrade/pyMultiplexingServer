@@ -19,6 +19,14 @@ def calcFileMD5(fileName,dataSize=1024):
             md5.update(data)   
     return (md5.digest(),md5.digest_size)
   
+def crcFromIntList(obj_list):
+    crc_size = 4
+    #make from list bytes
+    byte_obj_list = [obj.to_bytes(crc_size, byteorder='big') for obj in obj_list]
+    join_bytes = b''.join(byte_obj_list)
+    #calc crc32
+    return zlib.crc32(join_bytes)
+  
 class FileWorker:
     
     def __init__(self,sockWrapper,fileName,recoveryFunc,nPacks=6,bufferSize = 1024,timeOut=30):
@@ -67,6 +75,33 @@ class FileWorker:
         self.sock.disableReceiveTimeout()
         self.file.close()
 
+    def crcHandShake(self,arglist,toggle):
+        local_checksum = crcFromIntList(arglist)
+        peer_checksum = 0
+        #handshake
+        if toggle:#sending side
+            peer_checksum = self.sock.recvInt()
+            self.sock.sendInt(local_checksum)
+        else:#receiving side
+            self.sock.sendInt(local_checksum)
+            peer_checksum = self.sock.recvInt()
+        if peer_checksum != local_checksum:
+            raise FileWorkerError('wrong crc')
+
+    
+    def fileMd5HandShake(self,toggle):
+        #calc local md5
+        local_md5,md5_size = calcFileMD5(self.fileName)
+        peer_md5 = b''
+        if toggle:
+            peer_md5 = self.sock.recv(md5_size)
+            self.sock.send(local_md5)
+        else:
+            self.sock.send(local_md5)
+            peer_md5 = self.sock.recv(md5_size)
+        if local_md5 != peer_md5:
+            raise OSError("fail to transfer file")
+
     def sendFileInfo(self):
         if not os.path.exists(self.fileName):
             self.sock.sendRefuse() 
@@ -81,9 +116,7 @@ class FileWorker:
         self.sock.sendConfirm()
         self.fileLen = os.path.getsize(self.fileName)
         self.outFileInfo()
-        self.sock.setReceiveTimeout(self.timeOut)
-        goodChecksum = False
-        crc_size = 4  
+        self.sock.setReceiveTimeout(self.timeOut) 
         try:
             for i in range(self.nAttempts):
                 try:
@@ -92,21 +125,16 @@ class FileWorker:
                     self.sock.sendInt(self.timeOut)
                     self.sock.sendInt(self.fileLen)
                     #handshake
-                    #calculate checksum
-                    local_checksum = zlib.crc32(self.bufferSize.to_bytes(crc_size, byteorder='big') + self.timeOut.to_bytes(crc_size, byteorder='big') + self.fileLen.to_bytes(crc_size, byteorder='big'))
-                    peer_checksum = self.sock.recvInt()
-                    self.sock.sendInt(local_checksum)
-                    if peer_checksum == local_checksum:
-                        goodChecksum = True
-                        break
+                    self.crcHandShake([self.bufferSize,self.timeOut,self.fileLen],True)
+                    break
                 except OSError:
                     self.senderRecovers()
-            #if not goodChecksum:
-            if not goodChecksum:
-                raise FileWorkerError('attempts are exhausted')
+                except FileWorkerError:
+                    if i == self.nAttempts - 1:
+                        raise
+                    continue
         except FileWorkerError:
             self.onEndTranser()
-            raise
 
     def sendPacketsTCP(self):
         #file transfer
@@ -116,15 +144,9 @@ class FileWorker:
                     data = self.file.read(self.bufferSize)
                     #if eof
                     if not data:
-                        #calc local md5
-                        local_md5,md5_size = calcFileMD5(self.fileName)
-                        peer_md5 = self.sock.recv(md5_size)
-                        self.sock.send(local_md5)
-                        if local_md5 == peer_md5:
-                            self.onEndTranser()
-                            break
-                        else:
-                            raise OSError("fail to transfer file")
+                        self.fileMd5HandShake(True)
+                        self.onEndTranser()
+                        break
                     self.filePos += len(data)
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.') 
                     self.sock.send(data)
@@ -158,32 +180,26 @@ class FileWorker:
         except OSError:
             raise FileWorkerError("can't create the file")
         #get hints configs from the transmitter
-        goodChecksum = False
-        crc_size = 4
         try:
             for i in range(self.nAttempts):
                 try:
                     self.bufferSize = self.sock.recvInt()
                     self.timeOut = self.sock.recvInt()
                     self.fileLen = self.sock.recvInt()
-                    #calc crc32
-                    local_checksum = zlib.crc32(self.bufferSize.to_bytes(crc_size, byteorder='big') + self.timeOut.to_bytes(crc_size, byteorder='big') + self.fileLen.to_bytes(crc_size, byteorder='big'))
-                    #handshake
-                    self.sock.sendInt(local_checksum)
-                    peer_checksum = self.sock.recvInt()
-                    if peer_checksum == local_checksum:
-                        goodChecksum = True
-                        break
+                    self.crcHandShake([self.bufferSize,self.timeOut,self.fileLen],False)
+                    break
                 except OSError:
                     self.receiverRecovers()
-            if not goodChecksum:
-                raise FileWorkerError('attempts are exhausted')
+                except FileWorkerError:
+                    #wrong crc
+                    if i == self.nAttempts - 1:
+                        raise
+                    continue
         except FileWorkerError:
             self.onEndTranser()
-            raise
         self.outFileInfo()
 
-    def recvPacketsTCP(self,fileName):
+    def recvPacketsTCP(self):
         try:
             for pack in range(self.nPacks):
                 try:
@@ -193,16 +209,9 @@ class FileWorker:
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.')
                     if self.filePos == self.fileLen:
                         self.file.flush()
-                        #calc local md5
-                        local_md5,md5_size = calcFileMD5(self.fileName)
-                        #handshake
-                        self.sock.send(local_md5)
-                        peer_md5 = self.sock.recv(md5_size)
-                        if local_md5 == peer_md5:
-                            self.onEndTranser()
-                            break
-                        else:
-                            raise FileWorkerError('wrong md5')    
+                        self.fileMd5HandShake(False)
+                        self.onEndTranser()
+                        break    
                 except OSError as e:
                      #file transfer reconnection
                     self.receiverRecovers()
