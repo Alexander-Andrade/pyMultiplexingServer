@@ -57,7 +57,7 @@ class TCPServer:
                 #can work with the same client
                 print(e)
                 
-            except (OSError,FileWorkerCritError):
+            except (OSError,FileWorkerError):
                 #wait for the new client
                 break
 
@@ -183,7 +183,7 @@ class Query:
     def upload(self):
         #transfer init
         if self.status == QueryStatus.Actual:
-            self.fileWorker =  FileWorker(self.tcpSock,args,self.recoverTCP)
+            self.fileWorker =  FileWorker(self.tcpSock,self.args,self.recoverTCP)
             try:
                 self.fileWorker.recvFileInfo()
                 self.status = QueryStatus.InPorgress
@@ -219,7 +219,9 @@ class Query:
 
     import zlib
 if __name__ == "__main__": 
+    li = [b'qwe',b'cvb',b'qwqwfq']
+    j = b''.join(li)
     #f = open('hils.PNG','rb')
-    #f.flash()
-    server = TCPServer("localhost","6000")
+    #f.flush()
+    server = TCPServer("192.168.1.2","6000")
     server.clientsMultiplexing()

@@ -169,8 +169,8 @@ class FileWorker:
                     #calc crc32
                     local_checksum = zlib.crc32(self.bufferSize.to_bytes(crc_size, byteorder='big') + self.timeOut.to_bytes(crc_size, byteorder='big') + self.fileLen.to_bytes(crc_size, byteorder='big'))
                     #handshake
-                    self.sock.send(local_checksum)
-                    peer_checksum = self.sock.recv(crc_size)
+                    self.sock.sendInt(local_checksum)
+                    peer_checksum = self.sock.recvInt()
                     if peer_checksum == local_checksum:
                         goodChecksum = True
                         break
@@ -192,6 +192,7 @@ class FileWorker:
                     self.filePos += len(data)
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.')
                     if self.filePos == self.fileLen:
+                        self.file.flush()
                         #calc local md5
                         local_md5,md5_size = calcFileMD5(self.fileName)
                         #handshake
