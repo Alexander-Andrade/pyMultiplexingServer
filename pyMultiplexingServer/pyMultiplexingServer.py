@@ -111,6 +111,8 @@ class Query:
         self.str_cmd = str_cmd
         self.args = args
         self.clientIsAlive = True
+        #for UDP
+        self.udpClientAddr = None
 
    
     @classmethod
@@ -165,19 +167,31 @@ class Query:
         self.status = QueryStatus.Complete
         self.tcpSock.sendMsg(clientMsg)
 
+    def restoreClientAddrForUDP(self):
+        self.udpSock.clientAddr = self.udpClientAddr
+
+    def getClientAddr(self):
+        self.udpSock.recvInt()
+        self.udpClientAddr = self.udpSock.clientAddr
+
     def downloadStateMachine(self,sock,fileInfoRoutine,packetsRoutine,recoverRoutine,clientMsg):
        #transfer init
         if self.status == QueryStatus.Actual:
             self.fileWorker =  FileWorker(sock,self.args,recoverRoutine)
             try:
+                #get udp client addr
+                if sock.proto == IPPROTO_UDP:
+                    self.getClientAddr()
                 fileInfoRoutine(self.fileWorker)
                 self.status = QueryStatus.InPorgress
             except FileWorkerError as e:
                 self.clientIsAlive = False
-                self.completeState(e)
+                self.completeState(e.args[0])
        #packets
         elif self.status == QueryStatus.InPorgress:
             try:
+                if sock.proto == IPPROTO_UDP:
+                    self.restoreClientAddrForUDP()
                 packetsRoutine(self.fileWorker)
                 if self.fileWorker.file.closed:
                     #download complete
@@ -185,7 +199,7 @@ class Query:
             except FileWorkerError as e:
                 #download error
                 self.clientIsAlive = False
-                self.completeState(e)
+                self.completeState(e.args[0])
 
     def download(self):
         self.downloadStateMachine(self.tcpSock,FileWorker.sendFileInfo,FileWorker.sendPacketsTCP,self.recoverTCP,'file downloaded')
@@ -194,17 +208,8 @@ class Query:
         self.downloadStateMachine(self.tcpSock,FileWorker.recvFileInfo,FileWorker.recvPacketsTCP,self.recoverTCP,'file uploaded')
     
     def download_udp(self):
-        self.udpSock.recvInt()
-        self.fileWorker = FileWorker(self.udpSock,self.args,None)
-        try:
-            self.fileWorker.sendFileInfo()
-            self.fileWorker.sendPacketsUDP()
-        except FileWorkerError as e:
-            self.tcpSock.sendMsg(e.args[0])
-        else:
-            self.tcpSock.sendMsg('file downloaded')
-        finally:
-            self.status = QueryStatus.Complete
+        self.downloadStateMachine(self.udpSock,FileWorker.sendFileInfo,FileWorker.sendPacketsUDP,None,'file downloaded')
+        
             
 if __name__ == "__main__":  
     server = TCPServer("192.168.1.2","6000")

@@ -29,7 +29,7 @@ def crcFromIntList(obj_list):
   
 class FileWorker:
     
-    def __init__(self,sockWrapper,fileName,recoveryFunc,nPacks=32,bufferSize = 1024,timeOut=30):
+    def __init__(self,sockWrapper,fileName,recoveryFunc,nPacks=4,bufferSize = 1024,timeOut=30):
         self.timeOut = timeOut
         #packs throw one transfer
         self.nPacks = nPacks
@@ -197,6 +197,7 @@ class FileWorker:
     def tryToGetReflectedIdList(self,timeo=2):
         old_timeo = self.sock.raw_sock.gettimeout()
         self.sock.raw_sock.settimeout(timeo)
+        success = False
         try:
             self.peerIds = self.sock.recvIntList(len(self.localIds),8)
             self.sock.sendConfirm()
@@ -205,10 +206,12 @@ class FileWorker:
             if len(self.localIds) != 0:
                 self.edgeFilePos = self.file.tell()
                 self.useOldPacks = True
+            success = True
         except OSError:
             pass
         finally:
             self.sock.raw_sock.settimeout(old_timeo)
+            return success
 
     def getNextId(self):
         pack_id = 0
@@ -279,8 +282,8 @@ class FileWorker:
                     self.localIds.append(self.pack_id)
                     self.toNextPacket()    
                     if self.asyncWaitIdList:
-                        self.tryToGetReflectedIdList()
-                           
+                        if self.tryToGetReflectedIdList():
+                            return   
                 except OSError as e:
                     pass
             #acknowledge
