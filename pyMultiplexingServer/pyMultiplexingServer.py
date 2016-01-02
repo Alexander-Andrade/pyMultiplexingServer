@@ -113,7 +113,6 @@ class Query:
         self.clientIsAlive = True
         #for UDP
         self.udpClientAddr = None
-
    
     @classmethod
     def parseCommand(cls,cmd_msg):
