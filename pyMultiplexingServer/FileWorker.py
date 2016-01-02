@@ -29,7 +29,7 @@ def crcFromIntList(obj_list):
   
 class FileWorker:
     
-    def __init__(self,sockWrapper,fileName,recoveryFunc,nPacks=6,bufferSize = 1024,timeOut=30):
+    def __init__(self,sockWrapper,fileName,recoveryFunc,nPacks=32,bufferSize = 1024,timeOut=30):
         self.timeOut = timeOut
         #packs throw one transfer
         self.nPacks = nPacks
@@ -43,6 +43,16 @@ class FileWorker:
         self.recoveryFunc = recoveryFunc
         #number of transfer attempts
         self.nAttempts = 3
+        #for UDP
+        self.localIds = []
+        self.peerIds = []
+        self.pack_id = 0
+        self.curPackNo = 0
+        self.asyncWaitIdList = False
+        self.edgeFilePos = 0
+        self.useOldPacks = False
+        self.curOldId = 0
+        self.flLastPacketsAreIds = False
 
     def outFileInfo(self):
         #print file name
@@ -93,14 +103,21 @@ class FileWorker:
         #calc local md5
         local_md5,md5_size = calcFileMD5(self.fileName)
         peer_md5 = b''
-        if toggle:
-            peer_md5 = self.sock.recv(md5_size)
-            self.sock.send(local_md5)
-        else:
-            self.sock.send(local_md5)
-            peer_md5 = self.sock.recv(md5_size)
-        if local_md5 != peer_md5:
-            raise OSError("fail to transfer file")
+        old_timeo = self.sock.raw_sock.gettimeout()
+        self.sock.raw_sock.settimeout(self.timeOut)
+        try:
+            if toggle:
+                peer_md5 = self.sock.recv(md5_size)
+                self.sock.send(local_md5)
+            else:
+
+                self.sock.send(local_md5)
+                peer_md5 = self.sock.recv(md5_size)
+        except OSError:
+            pass
+        self.sock.raw_sock.settimeout(old_timeo)
+        return local_md5 == peer_md5
+          
 
     def sendFileInfo(self):
         if not os.path.exists(self.fileName):
@@ -144,9 +161,10 @@ class FileWorker:
                     data = self.file.read(self.bufferSize)
                     #if eof
                     if not data:
-                        self.fileMd5HandShake(True)
-                        self.onEndTranser()
-                        break
+                        if self.fileMd5HandShake(True):
+                            self.onEndTranser()
+                            break
+                        else: raise OSError('wrong md5')
                     self.filePos += len(data)
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.') 
                     self.sock.send(data)
@@ -155,8 +173,120 @@ class FileWorker:
                     self.senderRecovers()
         except FileWorkerError:
             self.onEndTranser()
-            raise           
+            raise
+                   
+    def transmitWithProtect(self,sendCallback,init_timeo=2):
+        old_timeo = self.sock.raw_sock.gettimeout()
+        acknowledged = False
+        timeo = init_timeo
+        self.sock.raw_sock.settimeout(init_timeo)
+        for i in range(self.nAttempts):
+            sendCallback()
+            #get ack on confirm
+            try:
+                self.sock.recvAck()
+                acknowledged = True
+                break
+            except OSError:
+                #timeo expanential distr
+                timeo <<= 1
+                self.sock.raw_sock.settimeout(timeo)
+        self.sock.raw_sock.settimeout(old_timeo)
+        return acknowledged
+
+    def tryToGetReflectedIdList(self,timeo=2):
+        old_timeo = self.sock.raw_sock.gettimeout()
+        self.sock.raw_sock.settimeout(timeo)
+        try:
+            self.peerIds = self.sock.recvIntList(len(self.localIds),8)
+            self.sock.sendConfirm()
+            self.localIds = [ id for id in self.localIds if id not in self.peerIds]
+            self.asyncWaitIdList = False
+            if len(self.localIds) != 0:
+                self.edgeFilePos = self.file.tell()
+                self.useOldPacks = True
+        except OSError:
+            pass
+        finally:
+            self.sock.raw_sock.settimeout(old_timeo)
+
+    def getNextId(self):
+        pack_id = 0
+        if self.useOldPacks:
+            if self.curPackNo < len(self.localIds):
+                pack_id = self.localIds[self.curPackNo]
+            else: 
+                self.useOldPacks = False
+                self.localIds.clear()
+                self.file.seek(self.edgeFilePos)
+        else:
+            pack_id = self.file.tell()       
+        return pack_id
          
+    def correctFilePos(self):
+        if self.pack_id != self.file.tell():
+            self.file.seek(self.pack_id)
+
+    def onNpacksSend(self):
+        self.asyncWaitIdList = True
+        self.curPackNo = 0
+    
+    def toNextPacket(self):  
+        if (self.flLastPacketsAreIds and self.curPackNo == (len(self.localIds) - 1) or \
+                                ( (not self.flLastPacketsAreIds) and self.curPackNo == (self.nPacks - 1))):
+            self.curPackNo = 0
+            self.asyncWaitIdList = True
+        else: self.curPackNo += 1 
+
+    def lastUDPPacketsHandling(self):
+        self.tryToGetReflectedIdList(self.timeOut)
+        if len(self.localIds) != 0:
+            #repeat last transfer
+            self.flLastPacketsAreIds = True
+            return False 
+        if self.fileMd5HandShake(True):
+            self.onEndTranser()
+        return True
+
+    def trackPacks(self):
+        print(self.curPackNo,end='')
+        print(':',end='')
+        print(self.pack_id)
+
+    def trackIds(self):
+        print('local ids:',end ='')
+        for id in self.localIds:
+            print(id,end =' ')
+        print()
+        print('peer ids:',end =' ')
+        for id in self.peerIds:
+            print(id,end =' ')
+        print() 
+
+    def sendPacketsUDP(self):
+        try:
+            while True:
+                try:
+                    self.pack_id = self.getNextId()
+                    self.correctFilePos()
+                    data = self.file.read(self.bufferSize)
+                    if not data:
+                        if self.lastUDPPacketsHandling():    
+                            break
+                        else: continue
+                    self.sock.send(self.pack_id.to_bytes(8,byteorder='big') + data)
+                    self.actualizeAndshowPercents(self.percentsOfLoading(self.file.tell()),20,'.')
+                    self.localIds.append(self.pack_id)
+                    self.toNextPacket()    
+                    if self.asyncWaitIdList:
+                        self.tryToGetReflectedIdList()
+                           
+                except OSError as e:
+                    pass
+            #acknowledge
+        except FileWorkerError:
+            self.onEndTranser()
+            raise     
             
     def senderRecovers(self):
         try:
@@ -209,9 +339,10 @@ class FileWorker:
                     self.actualizeAndshowPercents(self.percentsOfLoading(self.filePos),20,'.')
                     if self.filePos == self.fileLen:
                         self.file.flush()
-                        self.fileMd5HandShake(False)
-                        self.onEndTranser()
-                        break    
+                        if self.fileMd5HandShake(False):
+                            self.onEndTranser()
+                            break
+                        else: raise FileWorkerError('wrong md5')    
                 except OSError as e:
                      #file transfer reconnection
                     self.receiverRecovers()

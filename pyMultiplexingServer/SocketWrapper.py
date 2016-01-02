@@ -3,6 +3,9 @@ import struct
 import sys
 from random import randint
 
+def splitBytsToList(bytesToSplit,el_size):
+    return [bytesToSplit[i:i+el_size] for i in range(0,len(bytesToSplit),el_size)]
+
 class SockWrapper:
 
     def __init__(self,**sockArgs):
@@ -17,11 +20,6 @@ class SockWrapper:
         af_family,socktype,sock,canonname,sockaddr = addrInfo
         try:
             self.raw_sock = socket(af_family,socktype,sock)
-            """All errors raise exceptions. The normal exceptions for invalid argument
-            types and out-of-memory conditions can be raised; starting from Python 3.3,
-            errors related to socket or address semantics raise OSError or one of its
-            subclasses (they used to raise socket.error).
-            """
         except OSError as msg:
             self.raw_sock = None
             return False                   
@@ -78,6 +76,17 @@ class SockWrapper:
 
     def sendall(self,data):
         return self.raw_sock.sendall(data)
+
+    def sendIntList(self,list,el_size=8):
+        byte_list = [el.to_bytes(el_size,byteorder='big') for el in list]
+        joined_list = b''.join(byte_list)
+        return self.send(joined_list)
+
+    def recvIntList(self,n,el_size=8):
+        joined_list = self.recv(n * el_size)
+        bytes_list = splitBytsToList(joined_list,el_size) 
+        return [int.from_bytes(el,byteorder='big') for el in bytes_list]
+
 
     def recv(self,size,flags=0):
         return self.raw_sock.recv(size, flags)
@@ -167,10 +176,14 @@ class UDP_ServSockWrapper(SockWrapper):
     def __init__(self, IP, port,**sockArgs):
         super().__init__(inetAddr=(IP, port), type=SOCK_DGRAM,proto=IPPROTO_UDP,**sockArgs)
         self._attachServSock()
-        self.clentAddr = None
-        
-    def send(self, data):
-        return self.raw_sock.sendto()
+        self.clientAddr = None
+
+    def recv(self,size,flags=0):
+        data,self.clientAddr = self.raw_sock.recvfrom(size,flags)
+        return data
+
+    def send(self,data,flags=0):
+        return self.raw_sock.sendto(data,flags,self.clientAddr)
 
 
 
@@ -185,3 +198,10 @@ class UDP_ClientSockWrapper(SockWrapper):
     def __init__(self, IP, port,**sockArgs):
         super().__init__(inetAddr=(IP, port), type=SOCK_DGRAM,proto=IPPROTO_UDP,**sockArgs)
         self._attachClientSock()
+
+    def send(self,data,flags=0):
+        return self.raw_sock.sendto(data,flags,self.addr_info[4])
+
+    def recv(self,size,flags=0):
+        data,servAddr = self.raw_sock.recvfrom(size,flags)
+        return data
